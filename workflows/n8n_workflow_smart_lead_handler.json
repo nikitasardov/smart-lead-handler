@@ -1,0 +1,722 @@
+{
+  "name": "Smart Lead Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eb62f2fd-4c8a-47f5-aab5-b87b32dbe748",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -176,
+        -480
+      ],
+      "id": "f79be958-2dd5-4aa2-b192-980dfea384df",
+      "name": "Webhook",
+      "webhookId": "eb62f2fd-4c8a-47f5-aab5-b87b32dbe748",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "0DpTuSSjy5VF2yLW",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "anthropic/claude-haiku-4.5",
+          "mode": "id"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Данные заявки (JSON):\n{{ JSON.stringify($('Webhook').first().json.body ?? $('Webhook').first().json) }}"
+            }
+          ]
+        },
+        "options": {
+          "system": "Ты — парсер входящих лидов. Твой единственный допустимый формат вывода — один JSON-объект. Запрещено: пояснения, вопросы, просьбы прислать данные, markdown, блоки ``` , текст до или после JSON, ссылки на переменные ($json, n8n и т.п.).\n\nВход — JSON заявки с сайта (структура произвольная). Если вход пустой, не JSON или без полезных полей — всё равно верни JSON по схеме ниже с null в неизвестных полях; не объясняй причину.\n\nЗадачи (результат только в полях JSON):\n1. name, contact.email, contact.phone — извлечь только явные значения; иначе null.\n2. product — только из списка или null.\n3. temperature — hot | warm | cold (lowercase) по смыслу текста; при отсутствии смысла — cold.\n4. client_interest — 1–2 предложения по-русски, только факты из входа; если входа нет — \"\".\n5. draft_reply — черновик ответа для менеджеру по-русски; если входа нет — \"\".\n\nПродукты (product — только из списка или null):\n- Чат-бот для сайта\n- контакт-центр с ИИ\n- SMM-сопровождение\n- разработка сайта\n- MAX-боты для бизнеса\n- аудит бизнес-процессов\n\nКонтакт:\n- Не выдумывай email/телефон.\n- Не бери контакт из случайных цифр, ID, дат, мусорных полей.\n- Нет явного контакта → \"email\": null, \"phone\": null.\n\nТемпература (строго lowercase: hot | warm | cold). Решай по приоритету правил 1→4:\n\n1. hot — если есть явная срочность или готовность к сделке сейчас: «срочно», «сегодня», «на этой неделе готов оплатить», «жду звонка», «нужно внедрить немедленно», дедлайн в ближайшие дни.\n\n2. cold — если лид не готов к действию сейчас, даже при названии продукта:\n   - только узнать цену / «просто интересуюсь» / общий вопрос без шага к сделке;\n   - откладывает решение: «пока думаю», «позже», «напишу потом», «без обязательств», «если что»;\n   - нет запроса на звонок, встречу, КП, демо, внедрение — только пассивный интерес.\n   Пример: «Просто узнать цену на MAX боты, пока думаю, без обязательств, напишу позже» → cold.\n\n3. warm — интерес к конкретному продукту/внедрению и готовность к диалогу, но без признаков hot из п.1 и без откладывания из п.2:\n   - хочет обсудить, уточнить условия, сроки «на следующей неделе», сравнивает варианты, оставил контакт для связи.\n\n4. Если смысл неясен или вход пустой/мусор — cold.\n\nВажно: «интерес без срочности» сам по себе не warm. Если есть откладывание или только запрос цены — это cold (п.2), а не warm.\n\nСхема (все ключи обязательны):\n{\"name\":null,\"contact\":{\"email\":null,\"phone\":null},\"product\":null,\"temperature\":\"cold\",\"client_interest\":\"\",\"draft_reply\":\"\"}\n\nПеред отправкой ответа проверь: ответ начинается с { и заканчивается на }; внутри только валидный JSON.",
+          "maxTokens": 1024,
+          "temperature": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        304,
+        -480
+      ],
+      "id": "5f710fd6-35ca-4649-95bc-f77ad392a284",
+      "name": "Message a model",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "anthropicApi": {
+          "id": "GhkKclV965jU0yEW",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst parse_attempt = $('js_add_parse_attempt').first().json.parse_attempt ?? 1;\n\nlet raw = item.content?.[0]?.text ?? item.text ?? '';\nraw = raw.replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/i, '').trim();\n\nconst start = raw.indexOf('{');\nconst end = raw.lastIndexOf('}');\nif (start === -1 || end === -1) {\n  return [{ json: { parse_ok: false, parse_attempt, parse_error: 'LLM did not return JSON' } }];\n}\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw.slice(start, end + 1));\n} catch (e) {\n  return [{ json: { parse_ok: false, parse_error: String(e.message || e) } }];\n}\n\nconst email = (parsed.contact?.email ?? '').toString().trim();\nconst phone = (parsed.contact?.phone ?? '').toString().trim();\nconst contact_found = Boolean(email || phone);\n\nconst temperature = (parsed.temperature ?? '').toString().toLowerCase();\n\nreturn [{\n  json: {\n    parse_ok: true,\n    parse_attempt,\n    name: parsed.name ?? null,\n    contact: { email: email || null, phone: phone || null },\n    product: parsed.product ?? null,\n    temperature,\n    client_interest: parsed.client_interest ?? '',\n    draft_reply: parsed.draft_reply ?? '',\n    contact_found,\n    // сырой запрос с Webhook — для ветки «нет контакта»\n    lead_raw: $('Webhook').first().json.body ?? $('Webhook').first().json,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        -176
+      ],
+      "id": "338b36dc-b16f-4209-aae2-d9236e5dbc3c",
+      "name": "js_parse_llm_response"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsed = $input.first().json;\n\n// Исходный запрос — всегда из Webhook, без ручного маппинга полей\nconst wh = $('Webhook').first().json;\nconst leadRaw = wh.body ?? wh;\n\nconst reason =\n  'В заявке не обнаружены контактные данные (email и телефон). ' +\n  'Требуется ручная обработка администратором.';\n\nconst adminOutput = [\n  '=== Заявка без контакта ===',\n  '',\n  'Причина:',\n  reason,\n  '',\n  '--- Исходный JSON запроса ---',\n  JSON.stringify(leadRaw, null, 2),\n  '',\n  '--- Данные после разбора LLM ---',\n  `Имя: ${parsed.name ?? '—'}`,\n  `Email: ${parsed.contact?.email ?? '—'}`,\n  `Телефон: ${parsed.contact?.phone ?? '—'}`,\n  `Продукт: ${parsed.product ?? '—'}`,\n  `Температура: ${parsed.temperature ?? '—'}`,\n  `Интерес клиента: ${parsed.client_interest ?? '—'}`,\n  '',\n  'Черновик ответа клиенту:',\n  parsed.draft_reply ?? '—',\n].join('\\n');\n\nreturn [{\n  json: {\n    ...parsed,\n    admin_output: adminOutput,\n    ok: true,\n    branch: 'no_contact',\n    contact_found: false,\n    lead_raw: leadRaw,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        144
+      ],
+      "id": "379314dc-c8fa-48b3-bb3b-f636bea6a9ce",
+      "name": "js_no_contact"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ...$input.first().json,\n    parse_attempt: 1,\n    max_parse_attempts: 3,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        32,
+        -480
+      ],
+      "id": "8aa97d7e-bc27-48ad-a7fa-8958ea690359",
+      "name": "js_add_parse_attempt"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{\n  {\n    ok: $json.ok,\n    branch: $json.branch,\n    contact_found: $json.contact_found,\n    temperature: $json.temperature ?? null,\n    name: $json.name ?? null,\n    product: $json.product ?? null,\n    client_interest: $json.client_interest ?? null,\n    draft_reply: $json.draft_reply ?? null,\n    contact: $json.contact ?? { email: null, phone: null }\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1280,
+        -272
+      ],
+      "id": "74c95191-ab6b-4e17-985a-6a1f7e0a090d",
+      "name": "wh_response"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst text = [\n  '[hot]',\n  `Температура: ${d.temperature ?? 'hot'}`,\n  `Имя: ${d.name ?? '—'}`,\n  `Контакт: email=${d.contact?.email ?? '—'}, phone=${d.contact?.phone ?? '—'}`,\n  `Продукт: ${d.product ?? '—'}`,\n  `Интерес клиента: ${d.client_interest ?? '—'}`,\n  `Черновик ответа: ${d.draft_reply ?? '—'}`,\n].join('\\n');\nreturn [{\n  json: {\n    ...d,\n    lead_output: text,\n    ok: true,\n    branch: 'hot_output',\n    contact_found: true,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        -480
+      ],
+      "id": "91b65253-e451-459a-accb-aef3da4e82d0",
+      "name": "js_hot"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\n\nconst text = [\n  '[warm]',\n  `Температура: ${d.temperature ?? 'warm'}`,\n  `Имя: ${d.name ?? '—'}`,\n  `Контакт: email=${d.contact?.email ?? '—'}, phone=${d.contact?.phone ?? '—'}`,\n  `Продукт: ${d.product ?? '—'}`,\n  `Интерес клиента: ${d.client_interest ?? '—'}`,\n  `Черновик ответа: ${d.draft_reply ?? '—'}`,\n].join('\\n');\n\nreturn [{\n  json: {\n    ...d,\n    lead_output: text,\n    ok: true,\n    branch: 'warm_output',\n    contact_found: true,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        -272
+      ],
+      "id": "413e2566-fd09-4333-8d7e-f7bbb3793283",
+      "name": "js_warm"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\n\nconst text = [\n  '[cold]',\n  `Температура: ${d.temperature ?? 'cold'}`,\n  `Имя: ${d.name ?? '—'}`,\n  `Контакт: email=${d.contact?.email ?? '—'}, phone=${d.contact?.phone ?? '—'}`,\n  `Продукт: ${d.product ?? '—'}`,\n  `Интерес клиента: ${d.client_interest ?? '—'}`,\n  `Черновик ответа: ${d.draft_reply ?? '—'}`,\n].join('\\n');\n\nreturn [{\n  json: {\n    ...d,\n    lead_output: text,\n    ok: true,\n    branch: 'cold_log',\n    contact_found: true,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        -64
+      ],
+      "id": "2ae0b0fc-5dbd-448b-b559-aa423585c6e3",
+      "name": "js_cold"
+    },
+    {
+      "parameters": {
+        "chatId": "234567898765434567",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        976,
+        -480
+      ],
+      "id": "066978bd-1a8f-4cb6-8137-790819b4979d",
+      "name": "Send a text message",
+      "webhookId": "895f646d-8019-4451-993b-2eee78d2b4eb",
+      "credentials": {
+        "telegramApi": {
+          "id": "AhofSwzDbvYM3XnN",
+          "name": "Telegram account"
+        }
+      },
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        976,
+        -272
+      ],
+      "id": "600d4b07-7c5d-471b-9ff6-664c5a94001b",
+      "name": "Send a text message1",
+      "webhookId": "895f646d-8019-4451-993b-2eee78d2b4eb",
+      "credentials": {
+        "telegramApi": {
+          "id": "AhofSwzDbvYM3XnN",
+          "name": "Telegram account"
+        }
+      },
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        976,
+        -64
+      ],
+      "id": "1e94bcce-e4b2-41af-bbef-32e84fa5c301",
+      "name": "Append row in sheet",
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        976,
+        144
+      ],
+      "id": "5a8698f2-0a99-4208-a1f3-8dbdb8eecb35",
+      "name": "Send an Email",
+      "webhookId": "62368156-283d-466e-b3b0-e62a39330928",
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "html": "ERROR_LLM",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        976,
+        352
+      ],
+      "id": "ebc7a906-4afe-4416-9f70-a83011d36fbc",
+      "name": "Send an Email1",
+      "webhookId": "dd924058-716e-4e72-ace7-10c1bca77029",
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"ok\": false,\n  \"branch\": \"error_llm\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1280,
+        144
+      ],
+      "id": "5b7eb2a4-88d2-4a70-b30b-bf0d87befcde",
+      "name": "wh_response_llm_error"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ...$input.first().json,\n    parse_attempt: $input.first().json.parse_attempt + 1,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -128,
+        -176
+      ],
+      "id": "bdfb4a03-ad93-4d1f-8f56-7de8a2fb2ec7",
+      "name": "js_retry_failed_parse"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.parse_ok && $json.contact_found }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    },
+                    "id": "d2144085-6054-4474-b3c1-a8a8d0a06a28"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ok_cont_ok"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "10b782b1-7b63-4a83-b33c-b75b34f7f04a",
+                    "leftValue": "={{ $json.parse_ok && !$json.contact_found }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": "={{ true }}",
+              "outputKey": "ok_cont_NO"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "046b19bc-e5a7-4a6e-8b55-81e49723aa32",
+                    "leftValue": "={{ !$json.parse_ok && $json.parse_attempt }}",
+                    "rightValue": "={{ $('js_add_parse_attempt').item.json.max_parse_attempts }}",
+                    "operator": {
+                      "type": "number",
+                      "operation": "gte"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "no_attempts"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "4900d7b1-8739-43d2-a3a5-d19ea72092b1",
+                    "leftValue": "={{ !$json.parse_ok && $json.parse_attempt }}",
+                    "rightValue": "={{ $('js_add_parse_attempt').item.json.max_parse_attempts }}",
+                    "operator": {
+                      "type": "number",
+                      "operation": "lt"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "has_attempts"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        336,
+        240
+      ],
+      "id": "c072a7fc-9c40-40ee-9462-e801ab3a69c6",
+      "name": "Switch_parse_llm"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "0aa31a55-64d8-4f5e-9273-6f3a8e063c86",
+                    "leftValue": "={{ $json.temperature }}",
+                    "rightValue": "hot",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "hot"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "fc783e50-e6be-49d5-b150-46f7e7653ef3",
+                    "leftValue": "={{ $json.temperature }}",
+                    "rightValue": "warm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "warm"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.temperature }}",
+                    "rightValue": "cold",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "a3b0cd3e-f443-416b-8ace-8a9136d15f6a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cold"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        560,
+        -176
+      ],
+      "id": "75f1db64-d646-45f0-ad25-f6207127be5a",
+      "name": "Switch_temperature"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "js_add_parse_attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "js_parse_llm_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_parse_llm_response": {
+      "main": [
+        [
+          {
+            "node": "Switch_parse_llm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_no_contact": {
+      "main": [
+        [
+          {
+            "node": "Send an Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_add_parse_attempt": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_hot": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_warm": {
+      "main": [
+        [
+          {
+            "node": "Send a text message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_cold": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a text message": {
+      "main": [
+        [
+          {
+            "node": "wh_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a text message1": {
+      "main": [
+        [
+          {
+            "node": "wh_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "wh_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send an Email": {
+      "main": [
+        [
+          {
+            "node": "wh_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send an Email1": {
+      "main": [
+        [
+          {
+            "node": "wh_response_llm_error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js_retry_failed_parse": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_parse_llm": {
+      "main": [
+        [
+          {
+            "node": "Switch_temperature",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "js_no_contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send an Email1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "js_retry_failed_parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_temperature": {
+      "main": [
+        [
+          {
+            "node": "js_hot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "js_warm",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "js_cold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "6a2a9078-c891-4b1b-8b08-eb6758113700",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  },
+  "id": "WJ0uLfMAkMppaEVI",
+  "tags": []
+}
